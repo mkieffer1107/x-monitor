@@ -1,6 +1,6 @@
 # 𝕏 Monitor
 
-Terminal app for monitoring 𝕏 filtered-stream posts in real time, with optional per-target AI provider analysis.
+Terminal app for monitoring 𝕏 filtered-stream posts in real time with AI analysis.
 
 ## Quickstart
 
