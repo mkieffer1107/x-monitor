@@ -20,17 +20,6 @@ Fill in the `X_BEARER_TOKEN` environment variable and any optional LLM API keys.
 cargo run
 ```
 
-## Required API Keys
-
-- Required: `X_BEARER_TOKEN` (or `x_bearer_token`) for X API streaming.
-- Optional: AI provider keys for analysis (`XAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`), or enter a per-monitor API key override in the TUI.
-
-How to get your 𝕏 API bearer token:
-
-1. Create an 𝕏 developer account and open the [console](https://console.x.com/).
-2. Navigate to `Apps` in the left sidebar and create a new app.
-3. Copy your Bearer Token into the `X_BEARER_TOKEN` environment variable.
-
 ## Monitor Config Files
 
 For the YAML file picker, keep monitor target files in `monitor-configs/` (or set `monitor_config_dir` in `x-monitor.toml`).
