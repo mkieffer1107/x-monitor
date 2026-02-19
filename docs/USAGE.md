@@ -64,7 +64,8 @@ cargo run -- --log-file logs/my-session.log
 - `e`: edit selected monitor (temporarily disconnects it; reconnects on exit)
 - `d`: delete selected monitor
 - `s`: toggle selected target active/inactive
-- `r`: reconnect selected target (refresh its X stream rule)
+- `r`: refresh UI target status/colors
+- `t`: reconnect selected target (refresh its X stream rule)
 - `x`: terminate all filtered-stream connections for the app
 - `Tab`: switch focus between monitors and feed
 - `Up/Down`: navigate selected pane

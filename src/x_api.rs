@@ -27,9 +27,21 @@ struct RuleData {
     id: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamRule {
+    pub id: String,
+    pub tag: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct AddRuleResponse {
     data: Option<Vec<RuleData>>,
+    errors: Option<Vec<ApiError>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetRulesResponse {
+    data: Option<Vec<StreamRule>>,
     errors: Option<Vec<ApiError>>,
 }
 
@@ -166,8 +178,72 @@ impl XApiClient {
     }
 
     pub async fn delete_rule(&self, id: String) -> Result<()> {
+        self.delete_rule_ids(vec![id]).await.map(|_| ())
+    }
+
+    pub async fn list_rules(&self) -> Result<Vec<StreamRule>> {
+        let response = self
+            .http
+            .get("https://api.x.com/2/tweets/search/stream/rules")
+            .timeout(API_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .context("failed to call list rules endpoint")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("list rules failed ({status}): {body}");
+        }
+
+        let parsed = response
+            .json::<GetRulesResponse>()
+            .await
+            .context("failed to parse list rules response")?;
+
+        if let Some(errors) = parsed.errors {
+            let rendered = format_errors(&errors);
+            anyhow::bail!("list rules returned errors: {rendered}");
+        }
+
+        Ok(parsed.data.unwrap_or_default())
+    }
+
+    pub async fn delete_rules_by_tag(&self, tag: &str) -> Result<usize> {
+        let ids = self
+            .list_rules()
+            .await?
+            .into_iter()
+            .filter(|rule| rule.tag.as_deref() == Some(tag))
+            .map(|rule| rule.id)
+            .collect::<Vec<_>>();
+        self.delete_rule_ids(ids).await
+    }
+
+    pub async fn delete_rules_by_tag_prefix(&self, prefix: &str) -> Result<usize> {
+        let ids = self
+            .list_rules()
+            .await?
+            .into_iter()
+            .filter_map(|rule| {
+                let tag = rule.tag?;
+                if tag.starts_with(prefix) {
+                    Some(rule.id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        self.delete_rule_ids(ids).await
+    }
+
+    async fn delete_rule_ids(&self, ids: Vec<String>) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
         let body = DeleteRuleBody {
-            delete: DeleteRule { ids: vec![id] },
+            delete: DeleteRule { ids },
         };
 
         let response = self
@@ -185,7 +261,7 @@ impl XApiClient {
             anyhow::bail!("delete rule failed ({status}): {body}");
         }
 
-        Ok(())
+        Ok(body.delete.ids.len())
     }
 
     pub async fn terminate_all_connections(&self) -> Result<String> {

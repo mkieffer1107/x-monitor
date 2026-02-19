@@ -29,7 +29,7 @@ An example file is already included at [`monitor-configs/example-account.yaml`](
 ```yaml
 label: "Example"
 kind: account
-target: "@mkieffer1107, @sentdefender, @WarMonitors @DeptofWar"
+target: "@mkieffer1107, @sentdefender, @WarMonitors, @DeptofWar"
 ai:
   enabled: true
   provider: openrouter

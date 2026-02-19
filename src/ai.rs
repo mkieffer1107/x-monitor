@@ -60,6 +60,17 @@ fn render_user_prompt(template: &str, monitor_prompt: &str, post_text: &str) -> 
         .replace("{{post_text}}", post_text.trim())
 }
 
+pub fn prepare_prompts(prompt: &str, post_text: &str) -> (String, String, String) {
+    let system_prompt = DEFAULT_SYSTEM_PROMPT.to_string();
+    let monitor_prompt = if prompt.trim().is_empty() {
+        DEFAULT_MONITOR_PROMPT.to_string()
+    } else {
+        prompt.trim().to_string()
+    };
+    let user_prompt = render_user_prompt(USER_PROMPT_TEMPLATE, &monitor_prompt, post_text);
+    (system_prompt, monitor_prompt, user_prompt)
+}
+
 impl AiClient {
     pub fn new() -> Result<Self> {
         let http = reqwest::Client::builder()
@@ -88,13 +99,7 @@ impl AiClient {
 
         let endpoint = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
-        let system_prompt = DEFAULT_SYSTEM_PROMPT.to_string();
-        let monitor_prompt = if prompt.trim().is_empty() {
-            DEFAULT_MONITOR_PROMPT
-        } else {
-            prompt.trim()
-        };
-        let user_prompt = render_user_prompt(USER_PROMPT_TEMPLATE, monitor_prompt, &post_text);
+        let (system_prompt, _monitor_prompt, user_prompt) = prepare_prompts(&prompt, &post_text);
 
         let request = ChatCompletionRequest {
             model,

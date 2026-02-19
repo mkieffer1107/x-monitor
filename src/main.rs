@@ -10,7 +10,7 @@ use std::{
     fs::{self, File},
     io::{self, BufWriter, Stdout, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ai::AiClient;
@@ -22,9 +22,10 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use dotenvy::dotenv;
+use dotenvy::dotenv_override;
 use models::{Monitor, StreamPost};
 use ratatui::{Terminal, backend::CrosstermBackend};
+use serde::Serialize;
 use target_files::TargetFileMonitor;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
@@ -66,6 +67,36 @@ struct SessionLogger {
     path: PathBuf,
     writer: BufWriter<File>,
     last_feed_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+struct LlmRequestLog<'a> {
+    monitor: &'a str,
+    provider: &'a str,
+    model: &'a str,
+    endpoint: &'a str,
+    monitor_prompt: &'a str,
+    system_prompt: &'a str,
+    user_prompt: &'a str,
+    post_text: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct LlmResponseLog<'a> {
+    monitor: &'a str,
+    provider: &'a str,
+    model: &'a str,
+    url: Option<&'a str>,
+    output: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct LlmErrorLog<'a> {
+    monitor: &'a str,
+    provider: &'a str,
+    model: &'a str,
+    url: Option<&'a str>,
+    error: &'a str,
 }
 
 impl SessionLogger {
@@ -200,9 +231,51 @@ fn flush_session_logs(app: &mut App, session_logger: &mut Option<SessionLogger>)
     }
 }
 
+fn session_log_line(app: &mut App, session_logger: &mut Option<SessionLogger>, line: String) {
+    let Some(logger) = session_logger.as_mut() else {
+        return;
+    };
+
+    if let Err(error) = logger.log_line(&line) {
+        let message = format!("session logging disabled: {error}");
+        *session_logger = None;
+        app.push_error(message);
+    }
+}
+
+fn log_llm_request(
+    app: &mut App,
+    session_logger: &mut Option<SessionLogger>,
+    payload: &LlmRequestLog<'_>,
+) {
+    if let Ok(json) = serde_json::to_string(payload) {
+        session_log_line(app, session_logger, format!("LLM_REQUEST {json}"));
+    }
+}
+
+fn log_llm_response(
+    app: &mut App,
+    session_logger: &mut Option<SessionLogger>,
+    payload: &LlmResponseLog<'_>,
+) {
+    if let Ok(json) = serde_json::to_string(payload) {
+        session_log_line(app, session_logger, format!("LLM_RESPONSE {json}"));
+    }
+}
+
+fn log_llm_error(
+    app: &mut App,
+    session_logger: &mut Option<SessionLogger>,
+    payload: &LlmErrorLog<'_>,
+) {
+    if let Ok(json) = serde_json::to_string(payload) {
+        session_log_line(app, session_logger, format!("LLM_ERROR {json}"));
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenv().ok();
+    dotenv_override().ok();
     let cli = parse_cli_args()?;
     let mut session_logger = SessionLogger::from_cli(&cli)?;
 
@@ -252,6 +325,7 @@ async fn main() -> Result<()> {
         .clone()
         .map(XApiClient::new)
         .transpose()?;
+    enforce_startup_inactive_state(&mut app, &x_client).await;
 
     let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<AppMsg>();
 
@@ -284,6 +358,107 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn enforce_startup_inactive_state(app: &mut App, x_client: &Option<XApiClient>) {
+    let mut cleared_all_xmon_rules = false;
+
+    if let Some(client) = x_client.as_ref() {
+        app.set_stream_connected(false);
+        app.push_info("startup reset: terminating all filtered stream connections...");
+        match client.terminate_all_connections().await {
+            Ok(summary) => app.push_info(summary),
+            Err(error) => app.push_error(format!(
+                "startup reset failed to terminate stream connections: {error}"
+            )),
+        }
+
+        match client.delete_rules_by_tag_prefix("xmon:").await {
+            Ok(removed) => {
+                cleared_all_xmon_rules = true;
+                app.push_info(format!(
+                    "startup reset: removed {removed} x-monitor stream rule{}",
+                    if removed == 1 { "" } else { "s" }
+                ));
+            }
+            Err(error) => app.push_error(format!(
+                "startup reset failed to clean x-monitor rules: {error:#}"
+            )),
+        }
+    }
+
+    let monitor_snapshots = app
+        .monitors
+        .iter()
+        .map(|monitor| {
+            (
+                monitor.id,
+                monitor.label.clone(),
+                monitor.enabled,
+                monitor.rule_id.clone(),
+                monitor.rule_tag.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let mut changed = 0usize;
+    for (monitor_id, label, enabled, rule_id, rule_tag) in monitor_snapshots {
+        let has_rule = !rule_id.trim().is_empty();
+        let had_local_state = enabled || has_rule;
+        if !had_local_state {
+            continue;
+        }
+
+        let mut delete_ok = cleared_all_xmon_rules;
+        if !delete_ok && has_rule {
+            if let Some(client) = x_client.as_ref() {
+                delete_ok = true;
+                if let Err(error) = client.delete_rule(rule_id.clone()).await {
+                    if !is_rule_not_found_error(&error) {
+                        app.push_error(format!(
+                            "startup reset could not delete rule for '{label}': {error:#}"
+                        ));
+                        delete_ok = false;
+                    }
+                }
+            } else {
+                // No client/token available: preserve the known rule id in state.
+                delete_ok = false;
+            }
+        }
+
+        if !delete_ok && !rule_tag.trim().is_empty() {
+            if let Some(client) = x_client.as_ref() {
+                match client.delete_rules_by_tag(&rule_tag).await {
+                    Ok(_) => {
+                        delete_ok = true;
+                    }
+                    Err(error) => app.push_error(format!(
+                        "startup reset could not clean rule tag for '{label}': {error:#}"
+                    )),
+                }
+            }
+        }
+
+        let updated = if delete_ok {
+            app.deactivate_monitor(monitor_id)
+        } else {
+            app.disable_monitor_preserve_rule(monitor_id)
+        };
+        if updated {
+            changed += 1;
+        }
+    }
+
+    if changed > 0 {
+        app.push_info(format!(
+            "startup reset: set {changed} target{} to inactive",
+            if changed == 1 { "" } else { "s" }
+        ));
+        if let Err(error) = app.save_store() {
+            app.push_error(format!("startup reset could not persist state: {error}"));
+        }
+    }
+}
+
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
@@ -294,21 +469,60 @@ async fn run_app(
     session_logger: &mut Option<SessionLogger>,
 ) -> Result<()> {
     let mut stream_shutdown_tx: Option<watch::Sender<bool>> = None;
+    let mut initiating_status_tick = Instant::now();
     reconcile_stream_connection(app, &x_client, &msg_tx, &mut stream_shutdown_tx);
     flush_session_logs(app, session_logger);
 
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;
 
+        let mut redraw_immediately = false;
         while let Ok(message) = msg_rx.try_recv() {
-            handle_message(app, message, msg_tx.clone(), ai_client.clone());
+            if handle_message(
+                app,
+                message,
+                msg_tx.clone(),
+                ai_client.clone(),
+                session_logger,
+            ) {
+                redraw_immediately = true;
+                break;
+            }
         }
+        if redraw_immediately {
+            flush_session_logs(app, session_logger);
+            continue;
+        }
+
+        if app.has_initiating_monitors()
+            && initiating_status_tick.elapsed() >= Duration::from_secs(1)
+        {
+            app.refresh_monitor_connection_state();
+            initiating_status_tick = Instant::now();
+        }
+        if !app.has_initiating_monitors() {
+            initiating_status_tick = Instant::now();
+        }
+
         reconcile_stream_connection(app, &x_client, &msg_tx, &mut stream_shutdown_tx);
         flush_session_logs(app, session_logger);
 
         if app.should_quit {
             if let Some(shutdown_tx) = stream_shutdown_tx.take() {
                 let _ = shutdown_tx.send(true);
+            }
+            if let Some(client) = x_client.as_ref() {
+                app.set_stream_connected(false);
+                if app.has_enabled_monitors() {
+                    app.set_enabled_monitors_initiating();
+                }
+                app.push_info("terminating all filtered stream connections before exit...");
+                match client.terminate_all_connections().await {
+                    Ok(summary) => app.push_info(summary),
+                    Err(error) => app.push_error(format!(
+                        "failed to terminate stream connections before exit: {error}"
+                    )),
+                }
             }
             if let Err(error) = app.save_store() {
                 app.push_error(format!("failed to persist state: {error}"));
@@ -344,6 +558,7 @@ fn reconcile_stream_connection(
             let Some(client) = x_client.clone() else {
                 return;
             };
+            app.set_enabled_monitors_initiating();
             let (shutdown_tx, shutdown_rx) = watch::channel(false);
             let tx = msg_tx.clone();
             tokio::spawn(client.stream_loop(tx, shutdown_rx));
@@ -367,16 +582,25 @@ fn handle_message(
     message: AppMsg,
     msg_tx: mpsc::UnboundedSender<AppMsg>,
     ai_client: AiClient,
-) {
+    session_logger: &mut Option<SessionLogger>,
+) -> bool {
+    let mut received_stream_post = false;
+
     match message {
         AppMsg::Info(info) => app.push_info(info),
         AppMsg::Error(error) => app.push_error(error),
         AppMsg::StreamConnectionState(connected) => {
             app.set_stream_connected(connected);
+            if !connected && app.has_enabled_monitors() {
+                app.set_enabled_monitors_initiating();
+            }
         }
         AppMsg::MonitorAdded(result) => match result {
             Ok(monitor) => {
                 app.add_monitor(monitor.clone());
+                if monitor.enabled && !app.stream_connected() {
+                    app.set_monitor_initiating(monitor.id, true);
+                }
                 if let Err(error) = app.save_store() {
                     app.push_error(format!("monitor added but state save failed: {error}"));
                 }
@@ -416,7 +640,10 @@ fn handle_message(
                     app.push_info(format!("target activated: {label}"));
                 }
             }
-            Err(error) => app.push_error(format!("failed to activate target: {error}")),
+            Err(error) => {
+                app.push_error(format!("failed to activate target: {error}"));
+                app.refresh_monitor_connection_state();
+            }
         },
         AppMsg::MonitorDeactivated(result) => match result {
             Ok((monitor_id, label)) => {
@@ -429,7 +656,10 @@ fn handle_message(
                     app.push_info(format!("target deactivated: {label}"));
                 }
             }
-            Err(error) => app.push_error(format!("failed to deactivate target: {error}")),
+            Err(error) => {
+                app.push_error(format!("failed to deactivate target: {error}"));
+                app.refresh_monitor_connection_state();
+            }
         },
         AppMsg::MonitorDeleted(result) => match result {
             Ok((monitor_id, label)) => {
@@ -453,9 +683,14 @@ fn handle_message(
                     app.push_info(format!("target reconnected: {label}"));
                 }
             }
-            Err(error) => app.push_error(format!("failed to reconnect target: {error}")),
+            Err(error) => {
+                app.push_error(format!("failed to reconnect target: {error}"));
+                app.refresh_monitor_connection_state();
+            }
         },
         AppMsg::StreamPost(post) => {
+            received_stream_post = true;
+
             let matched = post
                 .matching_tags
                 .iter()
@@ -528,12 +763,29 @@ fn handle_message(
                 let provider_name_for_msg = provider.name.clone();
                 let model_name = model_id.clone();
                 let url = Some(post.post_url());
+                let (system_prompt, monitor_prompt, user_prompt) =
+                    ai::prepare_prompts(&prompt, &post_text);
+
+                log_llm_request(
+                    app,
+                    session_logger,
+                    &LlmRequestLog {
+                        monitor: &monitor_label,
+                        provider: &provider_name_for_msg,
+                        model: &model_name,
+                        endpoint: &provider.base_url,
+                        monitor_prompt: &monitor_prompt,
+                        system_prompt: &system_prompt,
+                        user_prompt: &user_prompt,
+                        post_text: &post_text,
+                    },
+                );
 
                 tokio::spawn(async move {
                     let output = client
                         .analyze_post(provider, model_id, prompt, post_text)
                         .await
-                        .map_err(|error| error.to_string());
+                        .map_err(|error| format!("{error:#}"));
                     let _ = tx.send(AppMsg::AnalysisCompleted {
                         monitor_label,
                         provider: provider_name_for_msg,
@@ -551,12 +803,40 @@ fn handle_message(
             output,
             url,
         } => match output {
-            Ok(text) => app.push_analysis(monitor_label, provider, model, text, url),
-            Err(error) => app.push_error(format!(
-                "analysis failed for '{monitor_label}' via {provider}:{model}: {error}"
-            )),
+            Ok(text) => {
+                log_llm_response(
+                    app,
+                    session_logger,
+                    &LlmResponseLog {
+                        monitor: &monitor_label,
+                        provider: &provider,
+                        model: &model,
+                        url: url.as_deref(),
+                        output: &text,
+                    },
+                );
+                app.push_analysis(monitor_label, provider, model, text, url)
+            }
+            Err(error) => {
+                log_llm_error(
+                    app,
+                    session_logger,
+                    &LlmErrorLog {
+                        monitor: &monitor_label,
+                        provider: &provider,
+                        model: &model,
+                        url: url.as_deref(),
+                        error: &error,
+                    },
+                );
+                app.push_error(format!(
+                    "analysis failed for '{monitor_label}' via {provider}:{model}: {error}"
+                ))
+            }
         },
     }
+
+    received_stream_post
 }
 
 fn handle_key(
@@ -586,7 +866,8 @@ fn handle_key(
         KeyCode::Char('e') => edit_selected_monitor(app, msg_tx, x_client),
         KeyCode::Char('s') => toggle_selected_monitor_activation(app, msg_tx, x_client),
         KeyCode::Char('d') => delete_selected_monitor(app, msg_tx, x_client),
-        KeyCode::Char('r') => reconnect_selected_monitor(app, msg_tx, x_client),
+        KeyCode::Char('r') => refresh_monitor_statuses(app),
+        KeyCode::Char('t') => reconnect_selected_monitor(app, msg_tx, x_client),
         KeyCode::Char('x') => terminate_all_connections(app, msg_tx, x_client),
         KeyCode::Char('o') => open_selected_feed_url(app),
         KeyCode::Char('c') => {
@@ -595,6 +876,16 @@ fn handle_key(
         }
         _ => {}
     }
+}
+
+fn refresh_monitor_statuses(app: &mut App) {
+    app.refresh_monitor_connection_state();
+    let stream = if app.stream_connected() {
+        "connected"
+    } else {
+        "disconnected"
+    };
+    app.push_info(format!("status refreshed (stream {stream})"));
 }
 
 fn handle_add_form_key(
@@ -850,7 +1141,7 @@ fn submit_monitor_form(
     tokio::spawn(async move {
         let result = create_monitor(client, pending)
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| format!("{error:#}"));
         let _ = msg_tx.send(AppMsg::MonitorAdded(result));
     });
 }
@@ -901,7 +1192,7 @@ fn submit_monitor_edit(
             Err(error) => {
                 let restore = reconnect_after_edit_exit(client, session.original_monitor.clone())
                     .await
-                    .map_err(|restore_error| restore_error.to_string());
+                    .map_err(|restore_error| format!("{restore_error:#}"));
                 match restore {
                     Ok((monitor_id, label, new_rule_id)) => {
                         let _ = msg_tx.send(AppMsg::MonitorReconnected(Ok((
@@ -948,7 +1239,7 @@ fn edit_selected_monitor(
     tokio::spawn(async move {
         let result = disconnect_monitor_for_edit(client, monitor.clone())
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| format!("{error:#}"));
         let _ = msg_tx.send(AppMsg::MonitorEditPrepared {
             monitor_id: monitor.id,
             result,
@@ -983,12 +1274,16 @@ fn cancel_monitor_edit(
     tokio::spawn(async move {
         let result = reconnect_after_edit_exit(client, monitor)
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| format!("{error:#}"));
         let _ = msg_tx.send(AppMsg::MonitorReconnected(result));
     });
 }
 
 async fn create_monitor(client: XApiClient, pending: PendingMonitor) -> Result<Monitor> {
+    if !pending.rule_tag.trim().is_empty() {
+        let _ = client.delete_rules_by_tag(&pending.rule_tag).await;
+    }
+
     let rule_id = client
         .add_rule(pending.query.clone(), pending.rule_tag.clone())
         .await
@@ -1024,21 +1319,23 @@ fn toggle_selected_monitor_activation(
     };
 
     if monitor.enabled {
+        app.set_monitor_initiating(monitor.id, false);
         app.set_monitor_active(monitor.id, false);
         app.push_info(format!("deactivating target '{}'...", monitor.label));
         tokio::spawn(async move {
             let result = deactivate_monitor_rule(client, monitor)
                 .await
-                .map_err(|error| error.to_string());
+                .map_err(|error| format!("{error:#}"));
             let _ = msg_tx.send(AppMsg::MonitorDeactivated(result));
         });
     } else {
+        app.set_monitor_initiating(monitor.id, true);
         app.set_monitor_active(monitor.id, false);
         app.push_info(format!("activating target '{}'...", monitor.label));
         tokio::spawn(async move {
             let result = activate_monitor_rule(client, monitor)
                 .await
-                .map_err(|error| error.to_string());
+                .map_err(|error| format!("{error:#}"));
             let _ = msg_tx.send(AppMsg::MonitorActivated(result));
         });
     }
@@ -1062,17 +1359,30 @@ fn delete_selected_monitor(
     app.push_info(format!("removing monitor '{}'...", monitor.label));
 
     tokio::spawn(async move {
-        let result = if monitor.rule_id.trim().is_empty() {
-            Ok((monitor.id, monitor.label))
-        } else {
-            client
-                .delete_rule(monitor.rule_id.clone())
-                .await
-                .map(|_| (monitor.id, monitor.label))
-                .map_err(|error| error.to_string())
-        };
+        let result = delete_monitor_rule(client, monitor)
+            .await
+            .map_err(|error| format!("{error:#}"));
         let _ = msg_tx.send(AppMsg::MonitorDeleted(result));
     });
+}
+
+async fn delete_monitor_rule(client: XApiClient, monitor: Monitor) -> Result<(Uuid, String)> {
+    if !monitor.rule_id.trim().is_empty() {
+        if let Err(error) = client.delete_rule(monitor.rule_id.clone()).await {
+            if !is_rule_not_found_error(&error) {
+                return Err(error).context("x rule deletion failed while deleting monitor");
+            }
+        }
+    }
+
+    if !monitor.rule_tag.trim().is_empty() {
+        client
+            .delete_rules_by_tag(&monitor.rule_tag)
+            .await
+            .context("x rule cleanup failed while deleting monitor")?;
+    }
+
+    Ok((monitor.id, monitor.label))
 }
 
 fn reconnect_selected_monitor(
@@ -1090,13 +1400,14 @@ fn reconnect_selected_monitor(
         return;
     };
 
+    app.set_monitor_initiating(monitor.id, true);
     app.set_monitor_active(monitor.id, false);
     app.push_info(format!("reconnecting target '{}'...", monitor.label));
 
     tokio::spawn(async move {
         let result = reconnect_monitor_rule(client, monitor)
             .await
-            .map_err(|error| error.to_string());
+            .map_err(|error| format!("{error:#}"));
         let _ = msg_tx.send(AppMsg::MonitorReconnected(result));
     });
 }
@@ -1113,6 +1424,13 @@ async fn reconnect_monitor_rule(
         }
     }
 
+    if !monitor.rule_tag.trim().is_empty() {
+        client
+            .delete_rules_by_tag(&monitor.rule_tag)
+            .await
+            .context("x rule tag cleanup failed during reconnect")?;
+    }
+
     let new_rule_id = client
         .add_rule(monitor.query.clone(), monitor.rule_tag.clone())
         .await
@@ -1122,14 +1440,19 @@ async fn reconnect_monitor_rule(
 }
 
 async fn deactivate_monitor_rule(client: XApiClient, monitor: Monitor) -> Result<(Uuid, String)> {
-    if monitor.rule_id.trim().is_empty() {
-        return Ok((monitor.id, monitor.label));
+    if !monitor.rule_id.trim().is_empty() {
+        if let Err(error) = client.delete_rule(monitor.rule_id.clone()).await {
+            if !is_rule_not_found_error(&error) {
+                return Err(error).context("x rule deletion failed while deactivating target");
+            }
+        }
     }
 
-    if let Err(error) = client.delete_rule(monitor.rule_id.clone()).await {
-        if !is_rule_not_found_error(&error) {
-            return Err(error).context("x rule deletion failed while deactivating target");
-        }
+    if !monitor.rule_tag.trim().is_empty() {
+        client
+            .delete_rules_by_tag(&monitor.rule_tag)
+            .await
+            .context("x rule tag cleanup failed while deactivating target")?;
     }
 
     Ok((monitor.id, monitor.label))
@@ -1139,6 +1462,21 @@ async fn activate_monitor_rule(
     client: XApiClient,
     monitor: Monitor,
 ) -> Result<(Uuid, String, String)> {
+    if !monitor.rule_id.trim().is_empty() {
+        if let Err(error) = client.delete_rule(monitor.rule_id.clone()).await {
+            if !is_rule_not_found_error(&error) {
+                return Err(error).context("x rule deletion failed while activating target");
+            }
+        }
+    }
+
+    if !monitor.rule_tag.trim().is_empty() {
+        client
+            .delete_rules_by_tag(&monitor.rule_tag)
+            .await
+            .context("x rule tag cleanup failed while activating target")?;
+    }
+
     let new_rule_id = client
         .add_rule(monitor.query.clone(), monitor.rule_tag.clone())
         .await
@@ -1148,10 +1486,19 @@ async fn activate_monitor_rule(
 }
 
 async fn disconnect_monitor_for_edit(client: XApiClient, monitor: Monitor) -> Result<Monitor> {
-    if let Err(error) = client.delete_rule(monitor.rule_id.clone()).await {
-        if !is_rule_not_found_error(&error) {
-            return Err(error).context("x rule deletion failed before edit");
+    if !monitor.rule_id.trim().is_empty() {
+        if let Err(error) = client.delete_rule(monitor.rule_id.clone()).await {
+            if !is_rule_not_found_error(&error) {
+                return Err(error).context("x rule deletion failed before edit");
+            }
         }
+    }
+
+    if !monitor.rule_tag.trim().is_empty() {
+        client
+            .delete_rules_by_tag(&monitor.rule_tag)
+            .await
+            .context("x rule tag cleanup failed before edit")?;
     }
 
     Ok(monitor)
@@ -1161,6 +1508,13 @@ async fn reconnect_after_edit_exit(
     client: XApiClient,
     monitor: Monitor,
 ) -> Result<(Uuid, String, String)> {
+    if !monitor.rule_tag.trim().is_empty() {
+        client
+            .delete_rules_by_tag(&monitor.rule_tag)
+            .await
+            .context("x rule tag cleanup failed while reconnecting after edit")?;
+    }
+
     let new_rule_id = client
         .add_rule(monitor.query.clone(), monitor.rule_tag.clone())
         .await
@@ -1185,6 +1539,9 @@ fn terminate_all_connections(
     };
 
     app.set_stream_connected(false);
+    if app.has_enabled_monitors() {
+        app.set_enabled_monitors_initiating();
+    }
     app.push_info("terminating all filtered stream connections...");
 
     tokio::spawn(async move {

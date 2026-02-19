@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     path::PathBuf,
 };
@@ -252,6 +252,7 @@ pub struct App {
     pub provider_names: Vec<String>,
     stream_connected: bool,
     monitor_activity: HashMap<Uuid, bool>,
+    monitor_initiating: HashSet<Uuid>,
     state_path: PathBuf,
     pub config: AppConfig,
 }
@@ -277,6 +278,7 @@ impl App {
             provider_names: config.provider_names(),
             stream_connected: false,
             monitor_activity,
+            monitor_initiating: HashSet::new(),
             state_path,
             config,
         }
@@ -528,6 +530,7 @@ impl App {
             .position(|monitor| monitor.id == monitor_id)?;
         let removed = self.monitors.remove(position);
         self.monitor_activity.remove(&removed.id);
+        self.monitor_initiating.remove(&removed.id);
 
         if self.selected_monitor >= self.monitors.len() && !self.monitors.is_empty() {
             self.selected_monitor = self.monitors.len() - 1;
@@ -548,6 +551,9 @@ impl App {
     pub fn set_stream_connected(&mut self, connected: bool) {
         self.stream_connected = connected;
         self.set_all_monitors_active(connected);
+        if connected {
+            self.monitor_initiating.clear();
+        }
     }
 
     pub fn stream_connected(&self) -> bool {
@@ -558,11 +564,51 @@ impl App {
         self.monitor_activity.insert(monitor_id, active);
     }
 
+    pub fn set_monitor_initiating(&mut self, monitor_id: Uuid, initiating: bool) {
+        if initiating {
+            self.monitor_initiating.insert(monitor_id);
+        } else {
+            self.monitor_initiating.remove(&monitor_id);
+        }
+    }
+
+    pub fn set_enabled_monitors_initiating(&mut self) {
+        for monitor in &self.monitors {
+            if monitor.enabled {
+                self.monitor_initiating.insert(monitor.id);
+            } else {
+                self.monitor_initiating.remove(&monitor.id);
+            }
+        }
+    }
+
+    pub fn has_initiating_monitors(&self) -> bool {
+        !self.monitor_initiating.is_empty()
+    }
+
+    pub fn monitor_is_initiating(&self, monitor_id: Uuid) -> bool {
+        self.monitor_initiating.contains(&monitor_id)
+    }
+
     pub fn monitor_is_active(&self, monitor_id: Uuid) -> bool {
         self.monitor_activity
             .get(&monitor_id)
             .copied()
             .unwrap_or(false)
+    }
+
+    pub fn refresh_monitor_connection_state(&mut self) {
+        self.set_all_monitors_active(self.stream_connected);
+        if self.stream_connected {
+            self.monitor_initiating.clear();
+            return;
+        }
+
+        self.monitor_initiating.retain(|monitor_id| {
+            self.monitors
+                .iter()
+                .any(|m| m.id == *monitor_id && m.enabled)
+        });
     }
 
     pub fn update_monitor_rule_id(&mut self, monitor_id: Uuid, new_rule_id: String) -> bool {
@@ -579,6 +625,9 @@ impl App {
             monitor.enabled = true;
             self.monitor_activity
                 .insert(monitor_id, self.stream_connected);
+            if self.stream_connected {
+                self.monitor_initiating.remove(&monitor_id);
+            }
             return true;
         }
 
@@ -594,6 +643,21 @@ impl App {
             monitor.enabled = false;
             monitor.rule_id.clear();
             self.monitor_activity.insert(monitor_id, false);
+            self.monitor_initiating.remove(&monitor_id);
+            return true;
+        }
+        false
+    }
+
+    pub fn disable_monitor_preserve_rule(&mut self, monitor_id: Uuid) -> bool {
+        if let Some(monitor) = self
+            .monitors
+            .iter_mut()
+            .find(|monitor| monitor.id == monitor_id)
+        {
+            monitor.enabled = false;
+            self.monitor_activity.insert(monitor_id, false);
+            self.monitor_initiating.remove(&monitor_id);
             return true;
         }
         false

@@ -113,7 +113,6 @@ fn render_monitors(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .iter()
             .enumerate()
             .map(|(index, monitor)| {
-                let active = monitor.enabled && app.monitor_is_active(monitor.id);
                 let selected = index == app.selected_monitor;
                 let kind = match monitor.kind {
                     MonitorKind::Account => "acct",
@@ -125,9 +124,9 @@ fn render_monitors(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     "AI:off".to_string()
                 };
 
-                let (status, mut status_style) = if !monitor.enabled {
-                    ("off", Style::default().fg(Color::Red))
-                } else if active {
+                let (status, mut status_style) = if app.monitor_is_initiating(monitor.id) {
+                    ("initiating", Style::default().fg(Color::Yellow))
+                } else if monitor.enabled && app.monitor_is_active(monitor.id) {
                     ("active", Style::default().fg(Color::Green))
                 } else {
                     ("inactive", Style::default().fg(Color::Red))
@@ -216,6 +215,8 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Span::styled("s", Style::default().fg(Color::Green)),
             Span::raw(" toggle active  "),
             Span::styled("r", Style::default().fg(Color::Green)),
+            Span::raw(" refresh status  "),
+            Span::styled("t", Style::default().fg(Color::Green)),
             Span::raw(" reconnect target  "),
             Span::styled("x", Style::default().fg(Color::Green)),
             Span::raw(" kill conns  "),
@@ -363,10 +364,9 @@ fn push_split_word(word: &str, width: usize, lines: &mut Vec<String>) {
 fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let text = if app.focus == FocusPane::Monitors {
         if let Some(monitor) = app.selected_monitor() {
-            let active = monitor.enabled && app.monitor_is_active(monitor.id);
-            let (status_text, status_style) = if !monitor.enabled {
-                ("off", Style::default().fg(Color::Red))
-            } else if active {
+            let (status_text, status_style) = if app.monitor_is_initiating(monitor.id) {
+                ("initiating", Style::default().fg(Color::Yellow))
+            } else if monitor.enabled && app.monitor_is_active(monitor.id) {
                 ("active", Style::default().fg(Color::Green))
             } else {
                 ("inactive", Style::default().fg(Color::Red))
