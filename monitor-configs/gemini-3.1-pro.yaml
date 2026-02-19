@@ -1,0 +1,8 @@
+label: money-maker
+kind: account
+target: "@GoogleDeepMind, @ArtificialAnlys, @arena, @JeffDean, @demishassabis, @OfficialLoganK, @osanseviero"
+ai:
+  enabled: true
+  provider: gemini
+  model: gemini-3-flash-preview
+  prompt: "If the tweet contains any information about gemini 3.1 pro or gemini 3.1 flash, respond with YES. Otherwise, respond with NO."

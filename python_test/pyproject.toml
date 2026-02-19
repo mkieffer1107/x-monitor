@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "x-monitor-python-test"
+version = "0.1.0"
+description = "Official XDK-based filtered stream test harness"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.68.2",
+    "python-dotenv>=1.0.1",
+    "rich>=13.9.4",
+    "xdk",
+]
+
+[project.scripts]
+tui = "x_monitor_python_test.tui:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["x_monitor_python_test"]
+
+[tool.uv]
+package = true

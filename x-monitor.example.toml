@@ -1,0 +1,33 @@
+# Copy this file to x-monitor.toml and fill in credentials.
+state_path = "x-monitor-state.json"
+monitor_config_dir = "monitor-configs"
+default_ai_provider = "grok"
+
+[[ai_providers]]
+name = "grok"
+base_url = "https://api.x.ai/v1"
+model = "grok-4-1-fast-non-reasoning"
+api_key_env = "XAI_API_KEY"
+[[ai_providers]]
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+model = "x-ai/grok-4.1-fast"
+api_key_env = "OPENROUTER_API_KEY"
+
+[[ai_providers]]
+name = "gemini"
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+model = "gemini-3-flash-preview"
+api_key_env = "GEMINI_API_KEY"
+
+[[ai_providers]]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-5-nano"
+api_key_env = "OPENAI_API_KEY"
+
+[[ai_providers]]
+name = "custom"
+base_url = ""
+model = ""
+# API key is entered per monitor in the Add Monitor panel.

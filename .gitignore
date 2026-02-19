@@ -1,0 +1,27 @@
+# Rust build artifacts
+/target/
+
+# Local app config/state
+/x-monitor.toml
+/x-monitor-state.json
+/logs/
+
+# Local secrets and environment files (keep committed examples)
+.env
+.env.*
+!.env.example
+!**/.env.example
+!/.example.env
+
+# Nested repository clone (kept out of this repo)
+/xdk/
+
+# Python test harness artifacts
+/python_test/.venv/
+/python_test/logs/
+/python_test/tui-state.json
+/python_test/**/__pycache__/
+*.py[cod]
+
+# OS junk
+.DS_Store
