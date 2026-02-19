@@ -20,12 +20,8 @@
 # Nested repository clone (kept out of this repo)
 /xdk/
 
-# Python test harness artifacts
-/python_test/.venv/
-/python_test/logs/
-/python_test/tui-state.json
-/python_test/**/__pycache__/
-*.py[cod]
+# Python test harness (local only)
+/python_test/
 
 # OS junk
 .DS_Store
