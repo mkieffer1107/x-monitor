@@ -6,6 +6,10 @@
 /x-monitor-state.json
 /logs/
 
+# Monitor config files (keep only the example in git)
+/monitor-configs/*
+!/monitor-configs/example-account.yaml
+
 # Local secrets and environment files (keep committed examples)
 .env
 .env.*

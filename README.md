@@ -29,10 +29,10 @@ An example file is already included at [`monitor-configs/example-account.yaml`](
 ```yaml
 label: "Example"
 kind: account
-target: "@handle_1, @handle2, @handle_3"
+target: "@mkieffer1107, @sentdefender, @WarMonitors @DeptofWar"
 ai:
   enabled: true
-  provider: grok
-  model: grok-4-1-fast-non-reasoning
+  provider: openrouter
+  model: x-ai/grok-4.1-fast
   prompt: "Are we going to war with Iran? Respond with YES or NO."
 ```

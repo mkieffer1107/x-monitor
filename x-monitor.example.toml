@@ -8,6 +8,7 @@ name = "grok"
 base_url = "https://api.x.ai/v1"
 model = "grok-4-1-fast-non-reasoning"
 api_key_env = "XAI_API_KEY"
+
 [[ai_providers]]
 name = "openrouter"
 base_url = "https://openrouter.ai/api/v1"
