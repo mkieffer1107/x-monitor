@@ -22,9 +22,9 @@ cargo run
 
 ## Monitor Config Files
 
-For the YAML file picker, keep monitor target files in `monitor-configs/` (or set `monitor_config_dir` in `x-monitor.toml`).
+For the YAML file picker, keep monitor target files in `monitor-configs/`.
 
-An example file is already included at `monitor-configs/example-account.yaml`:
+An example file is already included at [`monitor-configs/example-account.yaml`](monitor-configs/example-account.yaml):
 
 ```yaml
 label: "Example"
@@ -35,10 +35,4 @@ ai:
   provider: grok
   model: grok-4-1-fast-non-reasoning
   prompt: "Are we going to war with Iran? Respond with YES or NO."
-```
-
-Create another monitor file by copying the example:
-
-```bash
-cp monitor-configs/example-account.yaml monitor-configs/my-account-watch.yaml
 ```
