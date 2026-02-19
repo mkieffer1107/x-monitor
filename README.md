@@ -1,4 +1,4 @@
-# x-monitor
+# 𝕏 Monitor
 
 monitor the situation on 𝕏.
 

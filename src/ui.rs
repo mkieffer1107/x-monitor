@@ -9,7 +9,7 @@ use ratatui::{
 
 use crate::{
     app::{AddMonitorForm, App, FocusPane, MonitorFormMode, TargetFilePicker},
-    models::{FeedKind, MonitorKind},
+    models::{FeedKind, MonitorKind, parse_account_handles},
 };
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
@@ -387,7 +387,10 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     Span::styled(status_text, status_style),
                 ]),
                 Line::from(format!("Kind: {}", monitor.kind.display())),
-                Line::from(format!("Target: {}", monitor.input_value)),
+                Line::from(format!(
+                    "Target: {}",
+                    format_target_for_details(&monitor.kind, &monitor.input_value)
+                )),
                 Line::from(format!("Query: {}", monitor.query)),
                 // Line::from(format!(
                 //     "AI: {}",
@@ -452,6 +455,37 @@ fn render_details(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .border_style(Style::default().fg(Color::DarkGray)),
     );
     frame.render_widget(block, area);
+}
+
+fn format_target_for_details(kind: &MonitorKind, input_value: &str) -> String {
+    match kind {
+        MonitorKind::Account => format_account_target_for_details(input_value),
+        MonitorKind::Phrase => input_value.to_string(),
+    }
+}
+
+fn format_account_target_for_details(input_value: &str) -> String {
+    if let Ok(handles) = parse_account_handles(input_value) {
+        return handles
+            .into_iter()
+            .map(|handle| format!("@{handle}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+
+    input_value
+        .split(',')
+        .map(str::trim)
+        .filter(|handle| !handle.is_empty())
+        .map(|handle| {
+            if handle.starts_with('@') {
+                handle.to_string()
+            } else {
+                format!("@{handle}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn render_add_modal(frame: &mut Frame<'_>, app: &App, form: &AddMonitorForm) {
